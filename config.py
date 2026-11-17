@@ -19,3 +19,6 @@ DOWNLOAD_DIR = "downloads"
 
 # Kích thước chunk khi truyền nhận file hoặc buffer TCP (bytes)
 CHUNK_SIZE = 8192
+
+#giới hạn độ dài username
+MAX_USERNAME_BYTES = 64

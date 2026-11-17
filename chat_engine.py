@@ -7,7 +7,7 @@ import socket
 import threading
 from typing import Optional, Dict, List, Callable
 from peer_manager import PeerInfo
-from config import CHUNK_SIZE
+from config import CHUNK_SIZE, MAX_USERNAME_BYTES
 
 
 def recv_exact(sock: socket.socket, total_bytes: int) -> Optional[bytes]:
@@ -25,8 +25,10 @@ def recv_exact(sock: socket.socket, total_bytes: int) -> Optional[bytes]:
 
 
 class ChatEngine:
-    def __init__(self, my_tcp_port: int):
+    def __init__(self, my_tcp_port: int, my_username: str):
         self.tcp_port = my_tcp_port
+        self.my_username = my_username
+
         self.server_sock: Optional[socket.socket] = None
         self.is_running = False
 
@@ -71,6 +73,9 @@ class ChatEngine:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((peer.ip, peer.tcp_port))
+            id_packet = f"ID|{self.my_username}\n"
+            id_packet = id_packet.encode("utf-8")
+            sock.sendall(id_packet)
 
             with self.conn_lock:
                 self.current_sock = sock
@@ -135,8 +140,30 @@ class ChatEngine:
                     tag += ch
 
                 tag_str = tag[:-1].decode("utf-8", errors="ignore")
+                if tag_str == "ID":
+                    username_bytes = bytearray()
+                    while True:
+                        ch = sock.recv(1)
 
-                if tag_str == "MSG":
+                        if not ch:
+                            return
+
+                        if ch == b"\n":
+                            break
+
+                        username_bytes.extend(ch)
+
+                        if len(username_bytes) > MAX_USERNAME_BYTES:
+                            return
+                        
+                    username = username_bytes.decode("utf-8")
+                    if not username:
+                        return
+                    peer.username = username
+
+
+                
+                elif tag_str == "MSG":
                     # Đọc length
                     len_bytes = b""
                     while not len_bytes.endswith(b"|"):
