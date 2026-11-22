@@ -65,6 +65,8 @@ class FileTransfer:
                     received_bytes += len(chunk)
                     percent = int((received_bytes / filesize) * 100)
                     progress_cb(filename, percent, received_bytes == filesize, False)
+            if os.path.getsize(save_path) != filesize:
+                raise IOError("Kich thuoc file nhan duoc khong khop.")
         except Exception:
             if os.path.exists(save_path):
                 os.remove(save_path)  # Xóa file hỏng nếu truyền lỗi
