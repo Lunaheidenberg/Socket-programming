@@ -37,7 +37,7 @@ def main():
 
     ui = UIConsole()
     peer_manager = PeerManager(my_name, my_port, DEFAULT_DISCOVERY_PORT)
-    chat_engine = ChatEngine(my_port)
+    chat_engine = ChatEngine(my_port, my_name)
     file_transfer = FileTransfer()
 
     # 1. Đăng ký Callbacks

@@ -7,7 +7,7 @@ import socket
 import threading
 from typing import Optional, Dict, List, Callable
 from peer_manager import PeerInfo
-from config import CHUNK_SIZE
+from config import CHUNK_SIZE, MAX_USERNAME_BYTES
 
 
 def recv_exact(sock: socket.socket, total_bytes: int) -> Optional[bytes]:
@@ -23,10 +23,28 @@ def recv_exact(sock: socket.socket, total_bytes: int) -> Optional[bytes]:
             return None
     return bytes(buffer)
 
+def recv_field(sock: socket.socket, max_bytes: int) -> bytes:
+    data = bytearray()
+
+    while True:
+        ch = sock.recv(1)
+
+        if not ch:
+            raise ConnectionError("Connection closed during header")
+
+        if ch == b"|":
+            return bytes(data)
+
+        data.extend(ch)
+
+        if len(data) > max_bytes:
+            raise ValueError("Header field too long")
 
 class ChatEngine:
-    def __init__(self, my_tcp_port: int):
+    def __init__(self, my_tcp_port: int, my_username: str):
         self.tcp_port = my_tcp_port
+        self.my_username = my_username
+
         self.server_sock: Optional[socket.socket] = None
         self.is_running = False
 
@@ -71,6 +89,9 @@ class ChatEngine:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((peer.ip, peer.tcp_port))
+            id_packet = f"ID|{self.my_username}\n"
+            id_packet = id_packet.encode("utf-8")
+            sock.sendall(id_packet)
 
             with self.conn_lock:
                 self.current_sock = sock
@@ -124,54 +145,100 @@ class ChatEngine:
 
     def _receiver_loop(self, sock: socket.socket, peer: PeerInfo):
         """Luồng giải mã framing TCP stream liên tục."""
-        while self.is_running:
-            try:
-                # Đọc phần loại gói tin trước ký tự '|'
-                tag = b""
-                while not tag.endswith(b"|"):
-                    ch = sock.recv(1)
-                    if not ch:
-                        return
-                    tag += ch
-
-                tag_str = tag[:-1].decode("utf-8", errors="ignore")
-
-                if tag_str == "MSG":
-                    # Đọc length
-                    len_bytes = b""
-                    while not len_bytes.endswith(b"|"):
+        try:
+            while self.is_running:
+                try:
+                    # Đọc phần loại gói tin trước ký tự '|'
+                    tag = b""
+                    while not tag.endswith(b"|"):
                         ch = sock.recv(1)
                         if not ch:
                             return
-                        len_bytes += ch
-                    length = int(len_bytes[:-1].decode("utf-8"))
+                        tag += ch
 
-                    # Đọc chính xác nội dung tin nhắn
-                    payload_bytes = recv_exact(sock, length)
-                    if payload_bytes is None:
-                        return
-                    msg_text = payload_bytes.decode("utf-8", errors="ignore")
+                    tag_str = tag[:-1].decode("utf-8", errors="ignore")
+                    if tag_str == "ID":
+                        username_bytes = bytearray()
+                        while True:
+                            ch = sock.recv(1)
 
-                    is_current = (self.current_partner and self.current_partner.ip == peer.ip)
-                    if is_current:
-                        if self.on_message_received:
-                            self.on_message_received(peer.username, msg_text, True)
-                    else:
-                        # Lưu vào unread
-                        with self.unread_lock:
-                            self.unread_messages.setdefault(peer.username, []).append(msg_text)
-                            unread_count = len(self.unread_messages[peer.username])
-                        if self.on_unread_notification:
-                            self.on_unread_notification(peer.username, unread_count)
+                            if not ch:
+                                return
 
-                elif tag_str == "FILE":
-                    # Nhận thông tin file: FILE|<filename>|<size>|<binary_data>
-                    # Chuyển quyền xử lý cho module FileTransfer
-                    if self.on_file_header_received:
-                        self.on_file_header_received(sock, peer.username, 0)
+                            if ch == b"\n":
+                                break
 
-                elif tag_str == "BYE":
+                            username_bytes.extend(ch)
+
+                            if len(username_bytes) > MAX_USERNAME_BYTES:
+                                return
+                            
+                        username = username_bytes.decode("utf-8")
+                        if not username:
+                            return
+                        peer.username = username
+
+
+                    
+                    elif tag_str == "MSG":
+                        # Đọc length
+                        len_bytes = b""
+                        while not len_bytes.endswith(b"|"):
+                            ch = sock.recv(1)
+                            if not ch:
+                                return
+                            len_bytes += ch
+                        length = int(len_bytes[:-1].decode("utf-8"))
+
+                        # Đọc chính xác nội dung tin nhắn
+                        payload_bytes = recv_exact(sock, length)
+                        if payload_bytes is None:
+                            return
+                        msg_text = payload_bytes.decode("utf-8", errors="ignore")
+
+                        is_current = (self.current_partner and self.current_partner.ip == peer.ip)
+                        if is_current:
+                            if self.on_message_received:
+                                self.on_message_received(peer.username, msg_text, True)
+                        else:
+                            # Lưu vào unread
+                            with self.unread_lock:
+                                self.unread_messages.setdefault(peer.username, []).append(msg_text)
+                                unread_count = len(self.unread_messages[peer.username])
+                            if self.on_unread_notification:
+                                self.on_unread_notification(peer.username, unread_count)
+
+                    elif tag_str == "FILE":
+                        filename_bytes = recv_field(sock, 255)
+                        filesize_bytes = recv_field(sock, 20)
+
+                        filename = filename_bytes.decode("utf-8")
+                        filesize = int(filesize_bytes)
+
+                        if not filename or filename in (".", ".."):
+                            raise ValueError("Invalid filename")
+
+                        if "/" in filename or "\\" in filename:
+                            raise ValueError("Invalid filename")
+
+                        if filesize < 0:
+                            raise ValueError("Invalid file size")
+                        # Nhận thông tin file: FILE|<filename>|<size>|<binary_data>
+                        # Chuyển quyền xử lý cho module FileTransfer
+                        if self.on_file_header_received is None:
+                            raise RuntimeError("File receiver is not registered")
+
+                        self.on_file_header_received(sock, filename, filesize)
+                        return             
+
+                    elif tag_str == "BYE":
+                        break
+                except Exception:
                     break
-            except Exception:
-                break
-        sock.close()
+        finally:
+            with self.conn_lock:
+                if self.current_sock is sock:
+                    self.current_sock = None
+                    self.current_partner = None
+    
+            sock.close()
