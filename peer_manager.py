@@ -3,12 +3,41 @@ Module UDP Peer Discovery & Heartbeat (Phụ trách: Thành viên B).
 Quản lý gửi presence, lắng nghe trên port 9999 và theo dõi danh sách online/offline.
 """
 
+import ipaddress
+import psutil
 import socket
 import time
 import threading
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Set
 from config import DEFAULT_DISCOVERY_PORT, DISCOVERY_INTERVAL, PEER_TIMEOUT
 
+def get_subnet_broadcast_addresses() -> Set[str]:
+    # 1. Khởi tạo tập hợp địa chỉ broadcast với địa chỉ dự phòng
+    broadcast_ips = {"255.255.255.255"}
+
+    # 2. Truy vấn thông tin của tất cả giao diện mạng (network interface) đang hoạt động
+    interfaces = psutil.net_if_addrs()
+
+    # 3. Duyệt thông tin của từng interface
+    for interface_name, addresses in interfaces.items():
+        for addr in addresses:
+            # 4. Chỉ lọc lấy địa chỉ IPv4 của interface
+            if addr.family == socket.AF_INET:
+                ip = addr.address
+                netmask = addr.netmask
+
+                # 5. Bỏ quả nếu là địa chỉ loopback hoặc netmask không hợp lệ
+                if ip.startswith("127.") or not netmask:
+                    continue
+
+                try:
+                    # 6. Tính địa chỉ broadcast của interface
+                    network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
+                    broadcast_ips.add(str(network.broadcast_address))
+                except ValueError:
+                    pass
+
+    return broadcast_ips
 
 class PeerInfo:
     """Thông tin đại diện cho một peer trên mạng LAN."""
@@ -83,11 +112,20 @@ class PeerManager:
         while self.is_running:
             # Format: HELLO|<name>|<tcp_port>|<status>
             message = f"HELLO|{self.my_username}|{self.my_tcp_port}|{self.my_status}".encode("utf-8")
-            try:
-                sock.sendto(message, ("255.255.255.255", self.discovery_port))
-            except Exception:
-                pass
+
+            # Lấy danh sách địa chỉ broadcast cần gửi
+            broadcast_ips = get_subnet_broadcast_addresses()
+
+            # Gửi gói tin UPD đến từng địa chỉ broacast
+            for broadcast_ip in broadcast_ips:
+                try:
+                    sock.sendto(message, (broadcast_ip, self.discovery_port))
+                except Exception:
+                    pass
+
+            # Chờ 3 giây cho đến lần gửi tiếp theo
             time.sleep(DISCOVERY_INTERVAL)
+
         sock.close()
 
     def _listener_loop(self):
