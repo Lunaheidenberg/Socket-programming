@@ -208,29 +208,6 @@ class ChatEngine:
                             if self.on_unread_notification:
                                 self.on_unread_notification(peer.username, unread_count)
 
-                    elif tag_str == "FILE":
-                        filename_bytes = recv_field(sock, 255)
-                        filesize_bytes = recv_field(sock, 20)
-
-                        filename = filename_bytes.decode("utf-8")
-                        filesize = int(filesize_bytes)
-
-                        if not filename or filename in (".", ".."):
-                            raise ValueError("Invalid filename")
-
-                        if "/" in filename or "\\" in filename:
-                            raise ValueError("Invalid filename")
-
-                        if filesize < 0:
-                            raise ValueError("Invalid file size")
-                        # Nhận thông tin file: FILE|<filename>|<size>|<binary_data>
-                        # Chuyển quyền xử lý cho module FileTransfer
-                        if self.on_file_header_received is None:
-                            raise RuntimeError("File receiver is not registered")
-
-                        self.on_file_header_received(sock, filename, filesize)
-                        return             
-
                     elif tag_str == "BYE":
                         break
                 except Exception:

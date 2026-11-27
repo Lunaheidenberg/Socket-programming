@@ -38,7 +38,7 @@ def main():
     ui = UIConsole()
     peer_manager = PeerManager(my_name, my_port, DEFAULT_DISCOVERY_PORT)
     chat_engine = ChatEngine(my_port, my_name)
-    file_transfer = FileTransfer()
+    file_transfer = FileTransfer(my_port)
 
     # 1. Đăng ký Callbacks
     def on_peer_change(peer, is_online):
@@ -60,11 +60,16 @@ def main():
 
     chat_engine.on_unread_notification = on_unread_notification
 
+    file_transfer.on_progress = lambda filename, percent, is_done, is_error: ui.print_file_progress(filename, percent, is_done, is_error)
+
     # 2. Khởi động mạng
     if not chat_engine.start():
         ui.print_error(f"Khong the mo TCP Server tren port {my_port}")
         sys.exit(1)
     ui.print_system_notice(f"[*] Listening on TCP port {my_port}")
+
+    file_transfer.start_listener()
+    ui.print_system_notice(f"[*] File Transfer Listening on TCP port {file_transfer.file_port}")   
 
     peer_manager.start()
     ui.print_system_notice(f"[*] Broadcasting presence on UDP port {DEFAULT_DISCOVERY_PORT}")
@@ -127,12 +132,9 @@ def main():
                     if not chat_engine.current_sock:
                         ui.print_error("Ban phai mo phien /chat truoc khi gui file.")
                     else:
+                        target = chat_engine.current_partner
                         ui.print_system_notice(f"[*] Bat dau gui file: {filepath}")
-                        file_transfer.send_file_async(
-                            chat_engine.current_sock,
-                            filepath,
-                            lambda fname, pct, done, err: ui.print_file_progress(fname, pct, done, err)
-                        )
+                        file_transfer.send_file_async(target.ip, target.tcp_port, filepath)
 
             elif cmd == "/help":
                 show_help(ui)
