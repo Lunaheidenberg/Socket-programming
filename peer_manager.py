@@ -15,27 +15,30 @@ def get_subnet_broadcast_addresses() -> Set[str]:
     # 1. Khởi tạo tập hợp địa chỉ broadcast với địa chỉ dự phòng
     broadcast_ips = {"255.255.255.255"}
 
-    # 2. Truy vấn thông tin của tất cả giao diện mạng (network interface) đang hoạt động
-    interfaces = psutil.net_if_addrs()
+    try:
+        # 2. Truy vấn thông tin của tất cả giao diện mạng (network interface) đang hoạt động
+        interfaces = psutil.net_if_addrs()
 
-    # 3. Duyệt thông tin của từng interface
-    for interface_name, addresses in interfaces.items():
-        for addr in addresses:
-            # 4. Chỉ lọc lấy địa chỉ IPv4 của interface
-            if addr.family == socket.AF_INET:
-                ip = addr.address
-                netmask = addr.netmask
+        # 3. Duyệt thông tin của từng interface
+        for interface_name, addresses in interfaces.items():
+            for addr in addresses:
+                # 4. Chỉ lọc lấy địa chỉ IPv4 của interface
+                if addr.family == socket.AF_INET:
+                    ip = addr.address
+                    netmask = addr.netmask
 
-                # 5. Bỏ quả nếu là địa chỉ loopback hoặc netmask không hợp lệ
-                if ip.startswith("127.") or not netmask:
-                    continue
+                    # 5. Bỏ quả nếu là địa chỉ loopback hoặc netmask không hợp lệ
+                    if ip.startswith("127.") or not netmask:
+                        continue
 
-                try:
-                    # 6. Tính địa chỉ broadcast của interface
-                    network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
-                    broadcast_ips.add(str(network.broadcast_address))
-                except ValueError:
-                    pass
+                    try:
+                        # 6. Tính địa chỉ broadcast của interface
+                        network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
+                        broadcast_ips.add(str(network.broadcast_address))
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
 
     return broadcast_ips
 
@@ -106,48 +109,63 @@ class PeerManager:
 
     def _broadcaster_loop(self):
         """Gửi gói tin HELLO|<name>|<tcp_port>|<status> mỗi 3 giây."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-        while self.is_running:
-            # Format: HELLO|<name>|<tcp_port>|<status>
-            message = f"HELLO|{self.my_username}|{self.my_tcp_port}|{self.my_status}".encode("utf-8")
+            while self.is_running:
+                # Format: HELLO|<name>|<tcp_port>|<status>
+                message = f"HELLO|{self.my_username}|{self.my_tcp_port}|{self.my_status}".encode("utf-8")
 
-            # Lấy danh sách địa chỉ broadcast cần gửi
-            broadcast_ips = get_subnet_broadcast_addresses()
+                # Lấy danh sách địa chỉ broadcast cần gửi
+                broadcast_ips = get_subnet_broadcast_addresses()
 
-            # Gửi gói tin UPD đến từng địa chỉ broacast
-            for broadcast_ip in broadcast_ips:
+                # Gửi gói tin UPD đến từng địa chỉ broacast
+                for broadcast_ip in broadcast_ips:
+                    try:
+                        sock.sendto(message, (broadcast_ip, self.discovery_port))
+                    except Exception:
+                        pass
+
+                # Chờ 3 giây cho đến lần gửi tiếp theo
+                time.sleep(DISCOVERY_INTERVAL)
+        except OSError:
+            pass
+        finally:
+            if sock:
                 try:
-                    sock.sendto(message, (broadcast_ip, self.discovery_port))
-                except Exception:
+                    sock.close()
+                except OSError:
                     pass
-
-            # Chờ 3 giây cho đến lần gửi tiếp theo
-            time.sleep(DISCOVERY_INTERVAL)
-
-        sock.close()
 
     def _listener_loop(self):
         """Lắng nghe gói broadcast UDP trên port 9999."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock = None
         try:
-            # SO_REUSEPORT trên một số nền tảng hỗ trợ
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except AttributeError:
-            pass
-
-        sock.bind(("", self.discovery_port))
-
-        while self.is_running:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                data, (sender_ip, _) = sock.recvfrom(1024)
-                text = data.decode("utf-8", errors="ignore").strip()
-                self._parse_presence(text, sender_ip)
-            except Exception:
-                break
-        sock.close()
+                # SO_REUSEPORT trên một số nền tảng hỗ trợ
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except AttributeError:
+                pass
+
+            sock.bind(("", self.discovery_port))
+
+            while self.is_running:
+                try:
+                    data, (sender_ip, _) = sock.recvfrom(1024)
+                    text = data.decode("utf-8", errors="ignore").strip()
+                    self._parse_presence(text, sender_ip)
+                except (OSError, socket.error):
+                    break
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def _parse_presence(self, message: str, sender_ip: str):
         """Phân tích dữ liệu gói HELLO và cập nhật trạng thái peer."""
