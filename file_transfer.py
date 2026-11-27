@@ -35,7 +35,7 @@ class FileTransfer:
             self.is_running = True
 
             threading.Thread(target=self._acceptor_loop, daemon=True).start()
-        except Exception as e:
+        except (OSError, socket.error) as e:
             print(f"[!] Lỗi khởi tạo File Transfer Listener: {e}")
 
     def stop(self):
@@ -44,7 +44,7 @@ class FileTransfer:
         if self.server_sock:
             try:
                 self.server_sock.close()
-            except Exception:
+            except OSError:
                 pass
 
     def send_file_async(self, target_ip:str, target_tcp_port: int, filepath: str):
@@ -68,18 +68,19 @@ class FileTransfer:
         filename = os.path.basename(filepath)
         filesize = os.path.getsize(filepath)
         file_sock = None
+        sent_bytes = 0
 
         try:
             # Tạo kết nối TCP ngắn hạn để gửi file
             file_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            file_sock.settimeout(10.0)
             file_sock.connect((target_ip, target_file_port))
+            file_sock.settimeout(None)
 
             # Gửi header FILE|<filename>|<filesize>|
             header = f"FILE|{filename}|{filesize}|".encode("utf-8")
             file_sock.sendall(header)
 
-            sent_bytes = 0
-            percent = 0
             with open(filepath, "rb") as f:
                 while sent_bytes < filesize:
                     chunk = f.read(CHUNK_SIZE)
@@ -90,7 +91,7 @@ class FileTransfer:
                     percent = int((sent_bytes / filesize) * 100)
                     if self.on_progress:
                         self.on_progress(filename, percent, sent_bytes == filesize, False)
-        except Exception:
+        except (OSError, IOError, ConnectionResetError, TimeoutError    ):
             if self.on_progress:
                 self.on_progress(filename, percent, False, True)
 
@@ -98,7 +99,7 @@ class FileTransfer:
             if file_sock:
                 try:
                     file_sock.close()
-                except Exception:
+                except OSError:
                     pass
 
     def _acceptor_loop(self):
@@ -107,11 +108,13 @@ class FileTransfer:
             try:
                 conn_sock, _ = self.server_sock.accept()
                 threading.Thread(target=self._worker_receive, args=(conn_sock,), daemon=True).start()
-            except Exception:
+            except (OSError, socket.error):
                 break
 
     def _worker_receive(self, sock: socket.socket):
         """Đọc header file và lưu file nhị phân vào thư mục downloads/."""
+        save_path = ""
+        is_success = False
 
         # Đọc header file
         try:
@@ -121,20 +124,17 @@ class FileTransfer:
 
             filename_bytes = recv_field(sock, 255)
             filesize_bytes = recv_field(sock, 20)
-        except Exception:
-            return
 
-        filename = filename_bytes.decode("utf-8")
-        filesize = int(filesize_bytes)
+            filename = filename_bytes.decode("utf-8", errors="ignore")
+            filesize = int(filesize_bytes.decode("utf-8"))
 
-        # Validate đường dẫn tránh Path Traversal
-        if not filename or filename in (".", "..") or "/" in filename or "\\" in filename or filesize < 0:
-            raise ValueError("Invalid file header")
+            # Anti Path Traversal & Sanity Checks
+            if not filename or filename in (".", "..") or "/" in filename or "\\" in filename or filesize < 0:
+                raise ValueError("Invalid filename or filesize")
 
-        save_path = os.path.join(self.download_dir, filename)
-        received_bytes = 0
+            save_path = os.path.join(self.download_dir, filename)
+            received_bytes = 0
 
-        try:
             with open(save_path, "wb") as f:
                 while received_bytes < filesize:
                     remain = filesize - received_bytes
@@ -148,16 +148,23 @@ class FileTransfer:
                     if self.on_progress:
                         self.on_progress(filename, percent, received_bytes == filesize, False)
 
+            # Kiểm tra toàn vẹn dung lượng file
             if os.path.getsize(save_path) != filesize:
-                raise IOError("Kich thuoc file nhan duoc khong khop.")
-        except Exception:
-            if os.path.exists(save_path):
-                os.remove(save_path)  # Xóa file hỏng nếu truyền lỗi
+                raise IOError("Kich thuoc file nhan duoc khong khop voi header.")
+
+            is_success = True
+
+        except (OSError, IOError, ConnectionError, ValueError):
+            if save_path and os.path.exists(save_path) and not is_success:
+                try:
+                    os.remove(save_path)  # Xóa file hỏng nếu truyền lỗi
+                except OSError:
+                    pass
             if self.on_progress:
-                self.on_progress(filename, 0, False, True)
+                self.on_progress("File_Transfer", 0, False, True)
 
         finally:
             try:
                 sock.close()
-            except Exception:
+            except OSError:
                 pass
